@@ -38,7 +38,7 @@ class FingerPrinter:
 """
         print(banner)
         print(" " * 20 + "🔍 Scanning for DVR Devices\n")
-        a
+        
     def read_data(self):
         print(self.file.read_text(encoding='utf-8', errors='ignore'))
         
