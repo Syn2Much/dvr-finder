@@ -1,7 +1,7 @@
 
 # DVR Scanner & Fingerprinter (Brand Specific)
 
-Fast, multi-threaded scanner that fingerprints surveillance web interfaces (DVR/NVR) and security-related IoT devices. **Strict mode enabled: checks only for specific brands and known signatures.**
+Fast, multi-threaded scanner that fingerprints surveillance web interfaces (DVR/NVR) and security-related IoT devices. 
 
 ![Banner](https://img.shields.io/badge/DVR-Finder-blue)
 ![Python](https://img.shields.io/badge/Python-3.7%2B-green)
@@ -22,7 +22,8 @@ pip install requests urllib3
 
 ## Usage
 ```bash
-python dvr_finder -h      
+
+python dvr_finder -h 
 python dvr_finder.py -i ips.txt -t 10 -o dvr_scan_results.json
 ```
 
