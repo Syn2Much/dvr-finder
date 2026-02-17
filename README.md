@@ -7,6 +7,14 @@ Fast, multi-threaded scanner that fingerprints DVR/NVR web interfaces and securi
 
 ---
 
+## How It Works
+
+1. Reads target IPs from input file.
+2. Sends HTTP requests with browser-like headers.
+3. Skips 400/404 responses.
+4. Applies brand-specific signature matching against headers, body content, and page titles.
+5. Saves results incrementally, with full save on exit or interrupt.
+
 ## Features
 
 - **Brand-Specific Detection** — Strict signatures for Hikvision, Dahua, Uniview, Axis, Hanwha, XMEye, Amcrest, Reolink, MikroTik, Ubiquiti, Synology, and more.
@@ -40,13 +48,6 @@ python scanner.py -i ips.txt -t 20 --save-interval 5 -o results.json
 - **JSON** — Full metadata per detection (IP, status, headers, DVR type, detection method, signatures, timestamp).
 - **TXT** — Plain list of detected DVR IPs, saved alongside as `<output>_ips.txt`.
 
-## How It Works
-
-1. Reads target IPs from input file.
-2. Sends HTTP requests with browser-like headers.
-3. Skips 400/404 responses.
-4. Applies brand-specific signature matching against headers, body content, and page titles.
-5. Saves results incrementally, with full save on exit or interrupt.
 
 ## Disclaimer
 
@@ -59,6 +60,3 @@ Only scan hosts and networks you are authorized to test. Unauthorized scanning m
 - Email: [dev@sinnners.city](mailto:dev@sinnners.city)
 - X: [@synacket](https://x.com/synacket)
 
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
