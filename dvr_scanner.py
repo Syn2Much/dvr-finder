@@ -7,6 +7,8 @@ import threading
 import argparse
 import sys
 import signal
+import shutil
+import time
 from typing import List, Dict, Any, Tuple, Optional
 import requests
 from requests.adapters import HTTPAdapter
@@ -16,6 +18,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Pre-compiled title regex — used in hot path, compile once
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+class _C:
+    """ANSI escape codes for terminal coloring."""
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    CYAN = "\033[36m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+    CLEAR_LINE = "\033[2K"
 
 
 class FingerPrinter:
@@ -99,6 +113,10 @@ class FingerPrinter:
         self.shutdown_requested = False
         self.executor = None
 
+        self._print_lock = threading.Lock()
+        self._scan_start_time = 0.0
+        self._is_tty = sys.stdout.isatty()
+
         # Compile brand regex once
         self._compile_signatures()
 
@@ -122,6 +140,7 @@ class FingerPrinter:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
+        self._clear_status_bar()
         print(f"\n\n⚠️  Interrupt received!  Saving results and shutting down...")
         self.shutdown_requested = True
         self._save_results_safe()
@@ -134,11 +153,65 @@ class FingerPrinter:
         with self.results_lock:
             if self.dvr_results:
                 self._write_outputs(self.dvr_results)
-                print(f"💾 Saved {len(self.dvr_results)} DVR results")
+                self._print_persistent(f"💾 Saved {len(self.dvr_results)} DVR results")
             else:
                 self.output_json.write_text("[]", encoding="utf-8")
                 self.output_txt.write_text("", encoding="utf-8")
-                print("💾 No DVRs found yet, created empty output files")
+                self._print_persistent("💾 No DVRs found yet, created empty output files")
+
+    # ── Live display helpers ──────────────────────────────────────────
+
+    def _status_line(self) -> str:
+        """Build a compact progress bar: [####....] 1842/5000 | DVR: 3 | Fail: 412 | 23.4/s"""
+        scanned = self.scanned_count
+        total = self.total_ips or 1
+        dvr = self.dvr_count
+        fail = self.failed_count
+
+        elapsed = time.monotonic() - self._scan_start_time
+        rate = scanned / elapsed if elapsed > 0 else 0.0
+
+        try:
+            cols = shutil.get_terminal_size().columns
+        except Exception:
+            cols = 80
+        bar_max = min(30, cols - 50)
+        if bar_max < 5:
+            bar_max = 5
+        filled = int(bar_max * scanned / total) if total else 0
+        bar = "#" * filled + "." * (bar_max - filled)
+
+        return (
+            f"  {_C.DIM}[{bar}] {scanned}/{total}"
+            f" | DVR: {dvr} | Fail: {fail}"
+            f" | {rate:.1f}/s{_C.RESET}"
+        )
+
+    def _print_persistent(self, msg: str) -> None:
+        """Clear status bar, print a permanent line, redraw status bar."""
+        with self._print_lock:
+            if self._is_tty:
+                sys.stdout.write(f"\r{_C.CLEAR_LINE}")
+            sys.stdout.write(msg + "\n")
+            if self._is_tty:
+                sys.stdout.write(self._status_line())
+            sys.stdout.flush()
+
+    def _refresh_status(self) -> None:
+        """Overwrite the status bar in-place (no new line)."""
+        if not self._is_tty:
+            return
+        with self._print_lock:
+            sys.stdout.write(f"\r{_C.CLEAR_LINE}{self._status_line()}")
+            sys.stdout.flush()
+
+    def _clear_status_bar(self) -> None:
+        """Erase the status bar from the terminal."""
+        if self._is_tty:
+            sys.stdout.write(f"\r{_C.CLEAR_LINE}")
+            sys.stdout.flush()
+
+    # ── File output ───────────────────────────────────────────────────
 
     def _write_outputs(self, data: List[Dict[str, Any]]) -> None:
         """Single method that writes both JSON and TXT outputs."""
@@ -146,9 +219,15 @@ class FingerPrinter:
             self.output_json.write_text(
                 json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
             )
-            self.output_txt.write_text(
-                "\n".join(r["ip"] for r in data) + "\n", encoding="utf-8"
-            )
+            lines = []
+            for r in data:
+                url = r.get("url", "")
+                port = "80"
+                if ":" in url.split("//")[-1]:
+                    port = url.split(":")[-1].rstrip("/")
+                brands = ", ".join(r.get("dvr_type", []))
+                lines.append(f"{r['ip']}:{port} {brands}")
+            self.output_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
         except Exception as e:
             print(f"⚠️  Warning: Failed to save results: {e}")
 
@@ -163,7 +242,7 @@ class FingerPrinter:
     ║            \/                 \/       \/            \/      \/    \/         ║
     ║                         DVR Scanner & Fingerprinter                           ║
     ║                         v2.0 - dev@sinners.cty                                ║
-    ╚═══════════════════════════════════════════════════════════════════════════════╝    
+    ╚═══════════════════════════════════════════════════════════════════════════════╝
 """
         print(banner)
         print(" " * 20 + "🔍 Scanning for DVR Devices\n")
@@ -268,9 +347,12 @@ class FingerPrinter:
                 with self.results_lock:
                     self.scanned_count += 1
                     self.http_error_count += 1
-                print(
-                    f"⚫ [{self.scanned_count}/{self.total_ips}] {ip} - HTTP {response.status_code} (skipped)"
-                )
+                if self.verbose:
+                    self._print_persistent(
+                        f"  {_C.DIM}⚫ {ip} - HTTP {response.status_code} (skipped){_C.RESET}"
+                    )
+                else:
+                    self._refresh_status()
                 return None
 
             raw_result = {
@@ -301,7 +383,6 @@ class FingerPrinter:
         need_save = False
         with self.results_lock:
             self.scanned_count += 1
-            count = self.scanned_count
             if raw_result.get("status_code") is None:
                 self.failed_count += 1
             elif dvr_result:
@@ -316,27 +397,37 @@ class FingerPrinter:
 
         # Print outside the lock to reduce contention
         if raw_result.get("status_code") is None:
-            print(
-                f"✗ [{count}/{self.total_ips}] {ip} - {raw_result.get('error', 'Error')}"
-            )
+            if self.verbose:
+                self._print_persistent(
+                    f"  {_C.RED}✗ {ip} - {raw_result.get('error', 'Error')}{_C.RESET}"
+                )
+            else:
+                self._refresh_status()
         elif dvr_result:
             types = ", ".join(dvr_result["dvr_type"])
-            print(
-                f"🎯 [{count}/{self.total_ips}] DVR FOUND: {ip} | Status: {raw_result['status_code']} | Type: {types}"
+            self._print_persistent(
+                f"  {_C.GREEN}{_C.BOLD}* DVR FOUND: {ip}"
+                f" | Status: {raw_result['status_code']}"
+                f" | Type: {types}{_C.RESET}"
             )
             if need_save:
-                print(f"💾 Auto-saved {len(self.dvr_results)} DVR results")
+                self._print_persistent(
+                    f"  {_C.CYAN}! Auto-saved {len(self.dvr_results)} DVR results{_C.RESET}"
+                )
         else:
-            print(
-                f"✓ [{count}/{self.total_ips}] {ip} - Status: {raw_result['status_code']} (not DVR)"
-            )
+            if self.verbose:
+                self._print_persistent(
+                    f"  {_C.DIM}✓ {ip} - Status: {raw_result['status_code']} (not DVR){_C.RESET}"
+                )
+            else:
+                self._refresh_status()
 
         return raw_result
 
     def scan_main(self, max_threads=None):
         threads_to_use = max_threads if max_threads is not None else self.max_threads
         self.print_banner()
-        print(f"Starting DVR Scanner on {self.file} with {threads_to_use} threads...")
+        print(f"Starting DVR Scanner on {self.file} with {threads_to_use} threads...\n")
 
         try:
             content = self.file.read_text(encoding="utf-8")
@@ -345,6 +436,7 @@ class FingerPrinter:
 
         ips = [ip.strip() for ip in content.strip().split("\n") if ip.strip()]
         self.total_ips = len(ips)
+        self._scan_start_time = time.monotonic()
 
         try:
             with concurrent.futures.ThreadPoolExecutor(
@@ -366,11 +458,15 @@ class FingerPrinter:
         finally:
             self.executor = None
 
+        self._clear_status_bar()
+        print()
         self._print_summary(threads_to_use)
         return self.dvr_results
 
     def _print_summary(self, threads_used):
-        print(f"\n{'='*60}")
+        elapsed = time.monotonic() - self._scan_start_time
+        rate = self.scanned_count / elapsed if elapsed > 0 else 0.0
+        print(f"{'='*60}")
         print(f"SCAN SUMMARY")
         print(f"{'='*60}")
         print(f"Total IPs: {self.total_ips}")
@@ -378,6 +474,7 @@ class FingerPrinter:
         print(f"HTTP 400/404 skipped: {self.http_error_count}")
         print(f"Connection failed: {self.failed_count}")
         print(f"DVRs found: {self.dvr_count}")
+        print(f"Elapsed: {elapsed:.1f}s ({rate:.1f} IPs/s)")
         print(f"{'='*60}")
 
         if self.dvr_results:
